@@ -145,19 +145,33 @@ export function useLiveConversation(): UseLiveConversationReturn {
   // --- Mic Capture ---
   const startMic = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          sampleRate: 16000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      } catch {
+        // Fallback to basic audio constraint
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
       streamRef.current = stream;
 
-      const audioContext = new AudioContext({ sampleRate: 16000 });
+      let audioContext: AudioContext;
+      try {
+        audioContext = new AudioContext({ sampleRate: 16000 });
+      } catch {
+        audioContext = new AudioContext();
+      }
       audioContextRef.current = audioContext;
+
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
 
       await audioContext.audioWorklet.addModule('/worklet.js');
 
@@ -175,8 +189,15 @@ export function useLiveConversation(): UseLiveConversationReturn {
       source.connect(workletNode);
       // Connect to destination to keep processing alive (won't actually play mic audio)
       workletNode.connect(audioContext.destination);
-    } catch (err) {
-      setError('Microphone access denied. Please allow mic access and try again.');
+    } catch (err: unknown) {
+      const error = err as Error;
+      if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+        setError('Microphone access denied. Please check your browser permissions.');
+      } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+        setError('No microphone found. Please connect a microphone and try again.');
+      } else {
+        setError(error.message || 'Failed to initialize audio capture');
+      }
       console.error('Mic error:', err);
     }
   }, []);

@@ -2,7 +2,7 @@
  * AudioWorkletProcessor — runs in the audio thread.
  * Converts Float32 mic samples to Int16 PCM and posts them to the main thread.
  *
- * This file is loaded as a worklet module, not through the normal bundler.
+ * This file is loaded directly by the browser's AudioWorklet engine as pure JavaScript.
  */
 
 class PCMProcessor extends AudioWorkletProcessor {
@@ -10,7 +10,7 @@ class PCMProcessor extends AudioWorkletProcessor {
     super();
   }
 
-  process(inputs: Float32Array[][], _outputs: Float32Array[][], _parameters: Record<string, Float32Array>): boolean {
+  process(inputs, outputs, parameters) {
     const input = inputs[0];
     if (!input || input.length === 0) return true;
 

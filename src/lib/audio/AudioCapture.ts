@@ -25,18 +25,29 @@ export class AudioCapture {
     if (this._isCapturing) return;
 
     // Request microphone access
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        sampleRate: 16000,
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+    } catch {
+      this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    }
 
     // Create audio context at 16kHz (Gemini's expected input rate)
-    this.audioContext = new AudioContext({ sampleRate: 16000 });
+    try {
+      this.audioContext = new AudioContext({ sampleRate: 16000 });
+    } catch {
+      this.audioContext = new AudioContext();
+    }
+
+    if (this.audioContext.state === 'suspended') {
+      await this.audioContext.resume();
+    }
 
     // Load the worklet processor
     await this.audioContext.audioWorklet.addModule('/worklet.js');
