@@ -145,10 +145,16 @@ const DEFAULT_SCENARIOS = [
 ];
 
 async function run() {
-  const url = process.env.DATABASE_URL || 'file:local.db';
-  const authToken = process.env.TURSO_AUTH_TOKEN;
+  const rawUrl = process.env.DATABASE_URL || 'file:local.db';
+  const url = rawUrl.trim().replace(/^["']|["']$/g, '');
+  const rawToken = process.env.TURSO_AUTH_TOKEN;
+  const authToken = rawToken ? rawToken.trim().replace(/^["']|["']$/g, '') : undefined;
 
   console.log(`[DB Init] Connecting to ${url}...`);
+  if (url.startsWith('libsql://') && !authToken) {
+    console.warn('[DB Init] WARNING: Connecting to remote Turso database without TURSO_AUTH_TOKEN! Please set TURSO_AUTH_TOKEN in Render environment variables.');
+  }
+
   const client = createClient({
     url,
     ...(authToken ? { authToken } : {}),

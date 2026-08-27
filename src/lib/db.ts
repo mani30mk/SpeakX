@@ -9,8 +9,10 @@ let client: Client | null = null;
 
 export function getDb(): Client {
   if (!client) {
-    const url = process.env.DATABASE_URL ?? 'file:local.db';
-    const authToken = process.env.TURSO_AUTH_TOKEN;
+    const rawUrl = process.env.DATABASE_URL ?? 'file:local.db';
+    const url = rawUrl.trim().replace(/^["']|["']$/g, '');
+    const rawToken = process.env.TURSO_AUTH_TOKEN;
+    const authToken = rawToken ? rawToken.trim().replace(/^["']|["']$/g, '') : undefined;
 
     client = createClient({
       url,
