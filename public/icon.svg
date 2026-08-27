@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1b4b" />
+      <stop offset="50%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#090d16" />
+    </linearGradient>
+    <linearGradient id="primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#818cf8" />
+      <stop offset="50%" stop-color="#6366f1" />
+      <stop offset="100%" stop-color="#a855f7" />
+    </linearGradient>
+    <linearGradient id="glowGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#818cf8" />
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#6366f1" flood-opacity="0.4" />
+    </filter>
+  </defs>
+
+  <!-- Background rounded rect -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)" stroke="#312e81" stroke-width="6" />
+
+  <!-- Outer Glow Ring -->
+  <circle cx="256" cy="230" r="140" fill="none" stroke="url(#glowGrad)" stroke-width="4" opacity="0.25" stroke-dasharray="12 8" />
+
+  <!-- Microphone Capsule -->
+  <g filter="url(#shadow)">
+    <!-- Mic Body -->
+    <rect x="216" y="130" width="80" height="150" rx="40" fill="url(#primaryGrad)" />
+    
+    <!-- Mic Grille lines -->
+    <line x1="228" y1="175" x2="284" y2="175" stroke="#ffffff" stroke-width="4" stroke-linecap="round" opacity="0.6" />
+    <line x1="228" y1="205" x2="284" y2="205" stroke="#ffffff" stroke-width="4" stroke-linecap="round" opacity="0.6" />
+    <line x1="234" y1="235" x2="278" y2="235" stroke="#ffffff" stroke-width="4" stroke-linecap="round" opacity="0.6" />
+
+    <!-- Mic Stand Arc -->
+    <path d="M186 230 C186 285 326 285 326 230" fill="none" stroke="#e0e7ff" stroke-width="12" stroke-linecap="round" />
+    
+    <!-- Mic Stand Stem -->
+    <line x1="256" y1="285" x2="256" y2="350" stroke="#e0e7ff" stroke-width="12" stroke-linecap="round" />
+    
+    <!-- Mic Stand Base -->
+    <line x1="206" y1="350" x2="306" y2="350" stroke="#e0e7ff" stroke-width="12" stroke-linecap="round" />
+  </g>
+
+  <!-- Sound Waves (Left & Right) -->
+  <path d="M140 185 C125 210 125 250 140 275" fill="none" stroke="url(#glowGrad)" stroke-width="10" stroke-linecap="round" opacity="0.8" />
+  <path d="M110 160 C85 205 85 255 110 300" fill="none" stroke="url(#glowGrad)" stroke-width="8" stroke-linecap="round" opacity="0.4" />
+
+  <path d="M372 185 C387 210 387 250 372 275" fill="none" stroke="url(#glowGrad)" stroke-width="10" stroke-linecap="round" opacity="0.8" />
+  <path d="M402 160 C427 205 427 255 402 300" fill="none" stroke="url(#glowGrad)" stroke-width="8" stroke-linecap="round" opacity="0.4" />
+
+  <!-- SpeakX Text at Bottom -->
+  <text x="256" y="440" font-family="system-ui, -apple-system, sans-serif" font-size="44" font-weight="900" fill="#f8fafc" text-anchor="middle" letter-spacing="4">
+    SPEAK<tspan fill="#818cf8">X</tspan>
+  </text>
+</svg>

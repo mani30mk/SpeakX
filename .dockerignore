@@ -1,0 +1,11 @@
+.git
+.gitignore
+.next
+node_modules
+*.local
+local.db
+local.db-journal
+.env
+.env*.local
+README.md
+tests

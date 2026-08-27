@@ -1,0 +1,135 @@
+.header {
+  margin-bottom: var(--space-xl);
+}
+
+.header h1 {
+  margin-bottom: var(--space-sm);
+}
+
+.subtitle {
+  color: var(--text-secondary);
+  font-size: 0.9375rem;
+}
+
+/* Category filters */
+.filters {
+  display: flex;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-xl);
+  flex-wrap: wrap;
+}
+
+.filterBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  font-family: var(--font-body);
+}
+
+.filterBtn:hover {
+  border-color: var(--border-accent);
+  color: var(--text-primary);
+}
+
+.filterActive {
+  background: var(--accent-primary-subtle);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+/* Scenario grid */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: var(--space-md);
+}
+
+@media (max-width: 768px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.scenarioCard {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+  padding: var(--space-lg);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  transition: all var(--transition-base);
+}
+
+.scenarioCard:hover {
+  border-color: var(--border-accent);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.scenarioCard:hover .cardArrow {
+  transform: translateX(4px);
+  color: var(--accent-primary);
+}
+
+.cardIcon {
+  font-size: 2rem;
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+}
+
+.cardBody {
+  flex: 1;
+  min-width: 0;
+}
+
+.cardTitle {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+.cardDesc {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: var(--space-sm);
+}
+
+.cardMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.categoryTag {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+
+.cardArrow {
+  color: var(--text-muted);
+  font-size: 1.25rem;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+  align-self: center;
+}
