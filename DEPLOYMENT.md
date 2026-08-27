@@ -69,8 +69,8 @@ If you want a permanently hosted web application on the cloud:
 3. Click **New +** -> **Web Service** -> Connect your GitHub repository.
 4. Configure settings:
    - **Environment**: `Node`
-   - **Build Command**: `npm ci && npm run build`
-   - **Start Command**: `node server.js`
+   - **Build Command**: `npm ci --include=dev && npm run build`
+   - **Start Command**: `npm start`
    - **Instance Type**: `Free`
 5. Under **Environment Variables**, add:
    - `NODE_ENV`: `production`
