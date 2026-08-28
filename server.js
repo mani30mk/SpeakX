@@ -240,8 +240,77 @@ const app = next({ dev });
 const handle = app.getRequestHandler();
 
 app.prepare().then(async () => {
-  const server = createServer((req, res) => {
+  const server = createServer(async (req, res) => {
     const parsedUrl = parse(req.url, true);
+
+    // --- Diagnostic endpoint ---
+    if (parsedUrl.pathname === '/api/debug') {
+      res.setHeader('Content-Type', 'application/json');
+      const diagnostics = {
+        timestamp: new Date().toISOString(),
+        nodeVersion: process.version,
+        env: {
+          GEMINI_API_KEYS_set: !!(process.env.GEMINI_API_KEYS || '').trim(),
+          GEMINI_API_KEYS_count: (process.env.GEMINI_API_KEYS || '').split(',').filter(k => k.trim()).length,
+          GEMINI_LIVE_MODEL: process.env.GEMINI_LIVE_MODEL || '(not set, default: gemini-live-2.5-flash-preview)',
+          GEMINI_TEXT_MODEL: process.env.GEMINI_TEXT_MODEL || '(not set)',
+          DATABASE_URL_set: !!(process.env.DATABASE_URL || '').trim(),
+          NODE_ENV: process.env.NODE_ENV,
+        },
+        liveApiTest: null,
+      };
+
+      // Test Gemini Live API connection
+      try {
+        const orchestrator = getKeyOrchestrator();
+        const testKey = orchestrator.getKey();
+        const testClient = new GoogleGenAI({ apiKey: testKey });
+        const liveModel = (process.env.GEMINI_LIVE_MODEL || 'gemini-live-2.5-flash-preview').trim().replace(/^["']|["']$/g, '');
+
+        diagnostics.liveApiTest = { status: 'connecting', model: liveModel, keyPrefix: testKey.slice(0, 8) + '...' };
+
+        const session = await Promise.race([
+          testClient.live.connect({
+            model: liveModel,
+            config: {
+              responseModalities: [Modality.AUDIO],
+            },
+            callbacks: {
+              onopen: () => {},
+              onmessage: () => {},
+              onerror: (e) => {
+                console.error('[Debug] Live test onerror:', e?.message || e);
+              },
+              onclose: () => {},
+            },
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timed out after 10s')), 10000)),
+        ]);
+
+        // If we got here, the connection succeeded
+        diagnostics.liveApiTest = {
+          status: 'success',
+          model: liveModel,
+          keyPrefix: testKey.slice(0, 8) + '...',
+          message: 'Live API connection succeeded!',
+        };
+
+        // Close the test session
+        try { session.close(); } catch {}
+
+      } catch (error) {
+        diagnostics.liveApiTest = {
+          status: 'error',
+          message: error.message || String(error),
+          stack: error.stack?.split('\n').slice(0, 5),
+        };
+      }
+
+      res.statusCode = 200;
+      res.end(JSON.stringify(diagnostics, null, 2));
+      return;
+    }
+
     handle(req, res, parsedUrl);
   });
 
