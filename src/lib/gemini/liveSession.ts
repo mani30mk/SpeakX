@@ -7,8 +7,8 @@
 import { GoogleGenAI, Modality, type LiveServerMessage, type Session } from '@google/genai';
 import { getKeyOrchestrator } from '../keyOrchestrator';
 
-const rawLiveModel = process.env.GEMINI_LIVE_MODEL ?? 'gemini-2.0-flash-exp';
-const LIVE_MODEL = (rawLiveModel.includes('2.5-flash') || rawLiveModel.includes('live-preview')) ? 'gemini-2.0-flash-exp' : rawLiveModel;
+// Per @google/genai v2.19.0 SDK docs: Google AI model for Live API
+const LIVE_MODEL = (process.env.GEMINI_LIVE_MODEL ?? 'gemini-live-2.5-flash-preview').trim();
 
 export interface LiveSessionConfig {
   systemPrompt: string;

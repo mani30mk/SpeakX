@@ -101,16 +101,16 @@ class ServerGeminiLiveSession {
     this.currentKey = orchestrator.getKey();
 
     const client = new GoogleGenAI({ apiKey: this.currentKey });
-    let liveModel = (process.env.GEMINI_LIVE_MODEL || 'gemini-2.0-flash-exp').trim().replace(/^["']|["']$/g, '');
-    // Automatically sanitize placeholder or non-live model names
-    if (liveModel.includes('2.5-flash') || liveModel.includes('live-preview')) {
-      liveModel = 'gemini-2.0-flash-exp';
-    }
+    // Per @google/genai v2.19.0 SDK docs: Google AI model is 'gemini-live-2.5-flash-preview'
+    const liveModel = (process.env.GEMINI_LIVE_MODEL || 'gemini-live-2.5-flash-preview').trim().replace(/^["']|["']$/g, '');
 
     const fullSystemPrompt = [
       this.config.systemPrompt,
       this.config.memoryBrief ? `\n\n--- Student Background ---\n${this.config.memoryBrief}` : '',
     ].join('');
+
+    console.log(`[Live] Connecting to model: ${liveModel}`);
+    console.log(`[Live] API key: ${this.currentKey.slice(0, 8)}...`);
 
     try {
       this.session = await client.live.connect({
@@ -123,13 +123,24 @@ class ServerGeminiLiveSession {
         },
         callbacks: {
           onopen: () => {
+            console.log('[Live] Session opened successfully');
             this.isActive = true;
             orchestrator.reportSuccess(this.currentKey);
           },
-          onmessage: (e) => {
+          onmessage: (msg) => {
             if (!this.isActive) return;
-            const serverContent = e.serverContent;
+            const serverContent = msg.serverContent;
             if (!serverContent) return;
+
+            // Handle input transcription
+            if (serverContent.inputTranscription?.text) {
+              this.config.onTranscript('user', serverContent.inputTranscription.text);
+            }
+
+            // Handle output transcription
+            if (serverContent.outputTranscription?.text) {
+              this.config.onTranscript('ai', serverContent.outputTranscription.text);
+            }
 
             if (serverContent.modelTurn?.parts) {
               for (const part of serverContent.modelTurn.parts) {
@@ -143,13 +154,16 @@ class ServerGeminiLiveSession {
             }
           },
           onerror: (e) => {
-            const err = new Error(e.message || 'Live session error');
-            if (e.message?.includes('429') || e.message?.includes('RESOURCE_EXHAUSTED')) {
-              orchestrator.reportExhausted(this.currentKey, e.message);
+            console.error('[Live] Session error event:', e?.message || e);
+            const errMsg = e?.message || (typeof e === 'string' ? e : 'Live session error');
+            const err = new Error(errMsg);
+            if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')) {
+              orchestrator.reportExhausted(this.currentKey, errMsg);
             }
             this.config.onError(err);
           },
-          onclose: () => {
+          onclose: (e) => {
+            console.log('[Live] Session closed:', e?.code || 'unknown code', e?.reason || '');
             this.isActive = false;
             this.config.onClose();
           },
@@ -157,8 +171,10 @@ class ServerGeminiLiveSession {
       });
 
       this.isActive = true;
+      console.log('[Live] connect() returned session successfully');
       orchestrator.reportSuccess(this.currentKey);
     } catch (error) {
+      console.error('[Live] connect() threw:', error?.message || error);
       const err = error;
       if (err.status === 429 || err.message?.includes('RESOURCE_EXHAUSTED')) {
         orchestrator.reportExhausted(this.currentKey, err.message);
@@ -171,14 +187,16 @@ class ServerGeminiLiveSession {
   sendAudio(pcmBase64) {
     if (!this.session || !this.isActive) return;
     try {
+      // Use 'media' for sendRealtimeInput per SDK docs
       this.session.sendRealtimeInput({
-        audio: {
+        media: {
           data: pcmBase64,
           mimeType: 'audio/pcm;rate=16000',
         },
       });
     } catch (error) {
       const err = error;
+      console.error('[Live] sendAudio error:', err.message || err);
       if (err.status === 429 || err.message?.includes('RESOURCE_EXHAUSTED')) {
         getKeyOrchestrator().reportExhausted(this.currentKey, err.message);
         this.config.onError(new Error('API quota exhausted, please reconnect'));
