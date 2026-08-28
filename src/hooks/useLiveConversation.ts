@@ -14,6 +14,7 @@ interface UseLiveConversationReturn {
   stopSession: () => void;
   toggleMic: () => void;
   error: string | null;
+  clearError: () => void;
   sessionId: string | null;
 }
 
@@ -52,95 +53,50 @@ export function useLiveConversation(): UseLiveConversationReturn {
   }, []);
 
   const enqueueAudio = useCallback((pcmBase64: string) => {
-    if (!playbackContextRef.current) {
-      playbackContextRef.current = new AudioContext({ sampleRate: 24000 });
+    try {
+      if (!playbackContextRef.current || playbackContextRef.current.state === 'closed') {
+        playbackContextRef.current = new AudioContext({ sampleRate: 24000 });
+      }
+      const ctx = playbackContextRef.current;
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
+
+      // Decode base64 -> Int16 -> Float32
+      const binary = atob(pcmBase64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+      const int16 = new Int16Array(bytes.buffer);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+
+      const audioBuffer = ctx.createBuffer(1, float32.length, 24000);
+      audioBuffer.getChannelData(0).set(float32);
+      playbackQueueRef.current.push(audioBuffer);
+
+      if (!isPlayingRef.current) playNext();
+    } catch (e) {
+      console.error('Audio playback error:', e);
     }
-    const ctx = playbackContextRef.current;
-
-    // Decode base64 -> Int16 -> Float32
-    const binary = atob(pcmBase64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-    const int16 = new Int16Array(bytes.buffer);
-    const float32 = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
-
-    const audioBuffer = ctx.createBuffer(1, float32.length, 24000);
-    audioBuffer.getChannelData(0).set(float32);
-    playbackQueueRef.current.push(audioBuffer);
-
-    if (!isPlayingRef.current) playNext();
   }, [playNext]);
 
-  // --- WebSocket ---
-  const connectWs = useCallback((systemPrompt: string, memoryBrief?: string) => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws/live`);
-    wsRef.current = ws;
+  const stopMic = useCallback(() => {
+    try {
+      workletNodeRef.current?.disconnect();
+      workletNodeRef.current = null;
 
-    ws.onopen = () => {
-      ws.send(JSON.stringify({
-        type: 'start',
-        systemPrompt,
-        memoryBrief: memoryBrief || '',
-      }));
-    };
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
 
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-
-        switch (msg.type) {
-          case 'connected':
-            setSessionState('active');
-            setMicState('listening');
-            setError(null);
-            break;
-
-          case 'audio':
-            enqueueAudio(msg.data);
-            break;
-
-          case 'transcript':
-            setTranscript((prev) => [
-              ...prev,
-              {
-                id: `${msg.role}-${Date.now()}-${Math.random()}`,
-                role: msg.role,
-                text: msg.text,
-                timestamp: Date.now(),
-              },
-            ]);
-            break;
-
-          case 'error':
-            setError(msg.message);
-            break;
-
-          case 'session-ended':
-            setSessionState('idle');
-            setMicState('idle');
-            break;
-        }
-      } catch {
-        // Non-JSON message, ignore
+      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        audioContextRef.current.close();
       }
-    };
-
-    ws.onerror = () => {
-      setError('WebSocket connection failed');
-      setSessionState('idle');
-      setMicState('idle');
-    };
-
-    ws.onclose = () => {
-      if (sessionState === 'active') {
-        setSessionState('idle');
-        setMicState('idle');
-      }
-    };
-  }, [enqueueAudio, sessionState]);
+      audioContextRef.current = null;
+    } catch (e) {
+      console.warn('Error stopping mic:', e);
+    }
+  }, []);
 
   // --- Mic Capture ---
   const startMic = useCallback(async () => {
@@ -187,7 +143,6 @@ export function useLiveConversation(): UseLiveConversationReturn {
       };
 
       source.connect(workletNode);
-      // Connect to destination to keep processing alive (won't actually play mic audio)
       workletNode.connect(audioContext.destination);
     } catch (err: unknown) {
       const error = err as Error;
@@ -199,19 +154,92 @@ export function useLiveConversation(): UseLiveConversationReturn {
         setError(error.message || 'Failed to initialize audio capture');
       }
       console.error('Mic error:', err);
+      setSessionState('idle');
+      setMicState('idle');
+      stopMic();
     }
-  }, []);
+  }, [stopMic]);
 
-  const stopMic = useCallback(() => {
-    workletNodeRef.current?.disconnect();
-    workletNodeRef.current = null;
+  // --- WebSocket ---
+  const connectWs = useCallback((systemPrompt: string, memoryBrief?: string) => {
+    try {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws/live`);
+      wsRef.current = ws;
 
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
+      ws.onopen = () => {
+        ws.send(JSON.stringify({
+          type: 'start',
+          systemPrompt,
+          memoryBrief: memoryBrief || '',
+        }));
+      };
 
-    audioContextRef.current?.close();
-    audioContextRef.current = null;
-  }, []);
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+
+          switch (msg.type) {
+            case 'connected':
+              setSessionState('active');
+              setMicState('listening');
+              setError(null);
+              break;
+
+            case 'audio':
+              enqueueAudio(msg.data);
+              break;
+
+            case 'transcript':
+              setTranscript((prev) => [
+                ...prev,
+                {
+                  id: `${msg.role}-${Date.now()}-${Math.random()}`,
+                  role: msg.role,
+                  text: msg.text,
+                  timestamp: Date.now(),
+                },
+              ]);
+              break;
+
+            case 'error':
+              setError(msg.message || 'An error occurred during the live session.');
+              setSessionState('idle');
+              setMicState('idle');
+              stopMic();
+              break;
+
+            case 'session-ended':
+              setSessionState('idle');
+              setMicState('idle');
+              stopMic();
+              break;
+          }
+        } catch {
+          // Non-JSON message, ignore
+        }
+      };
+
+      ws.onerror = () => {
+        setError('WebSocket connection to SpeakX server failed.');
+        setSessionState('idle');
+        setMicState('idle');
+        stopMic();
+      };
+
+      ws.onclose = () => {
+        setSessionState('idle');
+        setMicState('idle');
+        stopMic();
+      };
+    } catch (e: unknown) {
+      const err = e as Error;
+      setError(err.message || 'Failed to establish WebSocket connection');
+      setSessionState('idle');
+      setMicState('idle');
+      stopMic();
+    }
+  }, [enqueueAudio, stopMic]);
 
   // --- Public API ---
   const startSession = useCallback((systemPrompt: string, memoryBrief?: string) => {
@@ -239,7 +267,9 @@ export function useLiveConversation(): UseLiveConversationReturn {
 
     // Flush playback
     playbackQueueRef.current = [];
-    playbackContextRef.current?.close();
+    if (playbackContextRef.current && playbackContextRef.current.state !== 'closed') {
+      playbackContextRef.current.close();
+    }
     playbackContextRef.current = null;
     isPlayingRef.current = false;
 
@@ -266,6 +296,10 @@ export function useLiveConversation(): UseLiveConversationReturn {
     }
   }, [sessionState, micState, startMic, stopMic]);
 
+  const clearError = useCallback(() => {
+    setError(null);
+  }, []);
+
   return {
     sessionState,
     micState,
@@ -274,6 +308,7 @@ export function useLiveConversation(): UseLiveConversationReturn {
     stopSession,
     toggleMic,
     error,
+    clearError,
     sessionId,
   };
 }

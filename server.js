@@ -101,7 +101,11 @@ class ServerGeminiLiveSession {
     this.currentKey = orchestrator.getKey();
 
     const client = new GoogleGenAI({ apiKey: this.currentKey });
-    const liveModel = process.env.GEMINI_LIVE_MODEL || 'gemini-2.5-flash-live-preview';
+    let liveModel = (process.env.GEMINI_LIVE_MODEL || 'gemini-2.0-flash-exp').trim().replace(/^["']|["']$/g, '');
+    // Automatically sanitize placeholder or non-live model names
+    if (liveModel.includes('2.5-flash') || liveModel.includes('live-preview')) {
+      liveModel = 'gemini-2.0-flash-exp';
+    }
 
     const fullSystemPrompt = [
       this.config.systemPrompt,
