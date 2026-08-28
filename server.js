@@ -8,8 +8,8 @@
 const { createServer } = require('http');
 const { parse } = require('url');
 const next = require('next');
-const { WebSocketServer } = require('ws');
-const { GoogleGenAI, Modality } = require('@google/genai');
+const { WebSocketServer, WebSocket } = require('ws');
+const { GoogleGenAI } = require('@google/genai');
 
 const dev = process.env.NODE_ENV !== 'production';
 const port = parseInt(process.env.PORT || '3000', 10);
@@ -87,11 +87,16 @@ function getKeyOrchestrator() {
   return keyOrchestratorInstance;
 }
 
-// Gemini Live API Session Manager
+/**
+ * Direct Gemini Live WebSocket Session Manager
+ *
+ * Uses native ws.WebSocket to connect directly to the Gemini Multimodal Live API.
+ * This avoids SDK abstractions and ensures reliable handshake & event delivery.
+ */
 class ServerGeminiLiveSession {
   constructor(config) {
     this.config = config;
-    this.session = null;
+    this.ws = null;
     this.currentKey = '';
     this.isActive = false;
   }
@@ -100,133 +105,182 @@ class ServerGeminiLiveSession {
     const orchestrator = getKeyOrchestrator();
     this.currentKey = orchestrator.getKey();
 
-    const client = new GoogleGenAI({ apiKey: this.currentKey });
-    // Per @google/genai v2.19.0 SDK docs: Google AI model is 'gemini-live-2.5-flash-preview'
-    const liveModel = (process.env.GEMINI_LIVE_MODEL || 'gemini-live-2.5-flash-preview').trim().replace(/^["']|["']$/g, '');
+    let rawModel = (process.env.GEMINI_LIVE_MODEL || 'gemini-2.0-flash-exp').trim().replace(/^["']|["']$/g, '');
+    if (!rawModel || rawModel.includes('2.5-flash-live-preview') || rawModel === 'gemini-live-2.5-flash-preview') {
+      rawModel = 'gemini-2.0-flash-exp';
+    }
+    const modelName = rawModel.startsWith('models/') ? rawModel : `models/${rawModel}`;
+
+    const host = 'generativelanguage.googleapis.com';
+    const uri = `wss://${host}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${this.currentKey}`;
 
     const fullSystemPrompt = [
       this.config.systemPrompt,
       this.config.memoryBrief ? `\n\n--- Student Background ---\n${this.config.memoryBrief}` : '',
     ].join('');
 
-    console.log(`[Live] Connecting to model: ${liveModel}`);
-    console.log(`[Live] API key: ${this.currentKey.slice(0, 8)}...`);
+    console.log(`[GeminiLive] Connecting to ${modelName}... (key: ${this.currentKey.slice(0, 8)}...)`);
 
-    try {
-      this.session = await client.live.connect({
-        model: liveModel,
-        config: {
-          responseModalities: [Modality.AUDIO],
-          systemInstruction: {
-            parts: [{ text: fullSystemPrompt }],
-          },
-        },
-        callbacks: {
-          onopen: () => {
-            console.log('[Live] Session opened successfully');
-            this.isActive = true;
-            orchestrator.reportSuccess(this.currentKey);
-          },
-          onmessage: (msg) => {
-            if (!this.isActive) return;
-            const serverContent = msg.serverContent;
-            if (!serverContent) return;
+    return new Promise((resolve, reject) => {
+      let isResolved = false;
+      const timeoutTimer = setTimeout(() => {
+        if (!isResolved) {
+          isResolved = true;
+          this.close();
+          reject(new Error(`Gemini Live connection timed out after 12s (model: ${modelName})`));
+        }
+      }, 12000);
 
-            // Handle input transcription
-            if (serverContent.inputTranscription?.text) {
-              this.config.onTranscript('user', serverContent.inputTranscription.text);
+      try {
+        const ws = new WebSocket(uri);
+        this.ws = ws;
+
+        ws.on('open', () => {
+          console.log('[GeminiLive] WebSocket connected. Sending setup message...');
+          const setupMsg = {
+            setup: {
+              model: modelName,
+              generationConfig: {
+                responseModalities: ['AUDIO'],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: {
+                      voiceName: 'Aoede', // Friendly, clear voice
+                    },
+                  },
+                },
+              },
+              systemInstruction: {
+                parts: [{ text: fullSystemPrompt }],
+              },
+            },
+          };
+          ws.send(JSON.stringify(setupMsg));
+        });
+
+        ws.on('message', (raw) => {
+          try {
+            const data = JSON.parse(raw.toString());
+
+            // Handshake complete
+            if (data.setupComplete) {
+              console.log('[GeminiLive] Setup completed successfully!');
+              this.isActive = true;
+              orchestrator.reportSuccess(this.currentKey);
+              if (!isResolved) {
+                isResolved = true;
+                clearTimeout(timeoutTimer);
+                resolve(this);
+              }
+              return;
             }
 
-            // Handle output transcription
-            if (serverContent.outputTranscription?.text) {
-              this.config.onTranscript('ai', serverContent.outputTranscription.text);
-            }
+            // Server Content (Audio / Transcript)
+            if (data.serverContent) {
+              const { modelTurn, interrupted, turnComplete } = data.serverContent;
 
-            if (serverContent.modelTurn?.parts) {
-              for (const part of serverContent.modelTurn.parts) {
-                if (part.inlineData?.data) {
-                  this.config.onAudio(part.inlineData.data);
-                }
-                if (part.text) {
-                  this.config.onTranscript('ai', part.text);
+              if (modelTurn?.parts) {
+                for (const part of modelTurn.parts) {
+                  if (part.inlineData?.data) {
+                    this.config.onAudio(part.inlineData.data);
+                  }
+                  if (part.text) {
+                    this.config.onTranscript('ai', part.text);
+                  }
                 }
               }
-            }
-          },
-          onerror: (e) => {
-            console.error('[Live] Session error event:', e?.message || e);
-            const errMsg = e?.message || (typeof e === 'string' ? e : 'Live session error');
-            const err = new Error(errMsg);
-            if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')) {
-              orchestrator.reportExhausted(this.currentKey, errMsg);
-            }
-            this.config.onError(err);
-          },
-          onclose: (e) => {
-            console.log('[Live] Session closed:', e?.code || 'unknown code', e?.reason || '');
-            this.isActive = false;
-            this.config.onClose();
-          },
-        },
-      });
 
-      this.isActive = true;
-      console.log('[Live] connect() returned session successfully');
-      orchestrator.reportSuccess(this.currentKey);
-    } catch (error) {
-      console.error('[Live] connect() threw:', error?.message || error);
-      const err = error;
-      if (err.status === 429 || err.message?.includes('RESOURCE_EXHAUSTED')) {
-        orchestrator.reportExhausted(this.currentKey, err.message);
-        return this.connect();
+              if (interrupted) {
+                console.log('[GeminiLive] Model interrupted by user');
+              }
+            }
+          } catch (err) {
+            console.error('[GeminiLive] Message parsing error:', err);
+          }
+        });
+
+        ws.on('error', (err) => {
+          console.error('[GeminiLive] Socket error:', err.message || err);
+          const msg = err.message || 'Gemini Live WebSocket error';
+          if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED')) {
+            orchestrator.reportExhausted(this.currentKey, msg);
+          }
+          this.config.onError(new Error(msg));
+          if (!isResolved) {
+            isResolved = true;
+            clearTimeout(timeoutTimer);
+            reject(err);
+          }
+        });
+
+        ws.on('close', (code, reason) => {
+          console.log(`[GeminiLive] Socket closed: code=${code}, reason=${reason?.toString() || 'none'}`);
+          this.isActive = false;
+          if (!isResolved) {
+            isResolved = true;
+            clearTimeout(timeoutTimer);
+            reject(new Error(`Gemini Live closed connection during setup (code ${code}: ${reason?.toString() || 'no reason'})`));
+          }
+          this.config.onClose();
+        });
+      } catch (err) {
+        if (!isResolved) {
+          isResolved = true;
+          clearTimeout(timeoutTimer);
+          reject(err);
+        }
       }
-      throw error;
-    }
+    });
   }
 
   sendAudio(pcmBase64) {
-    if (!this.session || !this.isActive) return;
+    if (!this.ws || !this.isActive || this.ws.readyState !== WebSocket.OPEN) return;
     try {
-      // Use 'media' for sendRealtimeInput per SDK docs
-      this.session.sendRealtimeInput({
-        media: {
-          data: pcmBase64,
-          mimeType: 'audio/pcm;rate=16000',
+      const msg = {
+        realtimeInput: {
+          mediaChunks: [
+            {
+              mimeType: 'audio/pcm;rate=16000',
+              data: pcmBase64,
+            },
+          ],
         },
-      });
-    } catch (error) {
-      const err = error;
-      console.error('[Live] sendAudio error:', err.message || err);
-      if (err.status === 429 || err.message?.includes('RESOURCE_EXHAUSTED')) {
-        getKeyOrchestrator().reportExhausted(this.currentKey, err.message);
-        this.config.onError(new Error('API quota exhausted, please reconnect'));
-      } else {
-        this.config.onError(error);
-      }
+      };
+      this.ws.send(JSON.stringify(msg));
+    } catch (err) {
+      console.error('[GeminiLive] sendAudio error:', err.message || err);
+      this.config.onError(err);
     }
   }
 
   sendText(text) {
-    if (!this.session || !this.isActive) return;
+    if (!this.ws || !this.isActive || this.ws.readyState !== WebSocket.OPEN) return;
     try {
-      this.session.sendClientContent({
-        turns: [{ role: 'user', parts: [{ text }] }],
-        turnComplete: true,
-      });
-    } catch (error) {
-      this.config.onError(error);
+      const msg = {
+        clientContent: {
+          turns: [
+            {
+              role: 'user',
+              parts: [{ text }],
+            },
+          ],
+          turnComplete: true,
+        },
+      };
+      this.ws.send(JSON.stringify(msg));
+    } catch (err) {
+      console.error('[GeminiLive] sendText error:', err.message || err);
+      this.config.onError(err);
     }
   }
 
   close() {
     this.isActive = false;
-    if (this.session) {
+    if (this.ws) {
       try {
-        this.session.close();
-      } catch {
-        // Ignore close errors
-      }
-      this.session = null;
+        this.ws.close();
+      } catch {}
+      this.ws = null;
     }
     this.config.onClose();
   }
@@ -246,64 +300,104 @@ app.prepare().then(async () => {
     // --- Diagnostic endpoint ---
     if (parsedUrl.pathname === '/api/debug') {
       res.setHeader('Content-Type', 'application/json');
+      const orchestrator = getKeyOrchestrator();
+      let testKey = '';
+      try {
+        testKey = orchestrator.getKey();
+      } catch {}
+
       const diagnostics = {
         timestamp: new Date().toISOString(),
         nodeVersion: process.version,
         env: {
           GEMINI_API_KEYS_set: !!(process.env.GEMINI_API_KEYS || '').trim(),
-          GEMINI_API_KEYS_count: (process.env.GEMINI_API_KEYS || '').split(',').filter(k => k.trim()).length,
-          GEMINI_LIVE_MODEL: process.env.GEMINI_LIVE_MODEL || '(not set, default: gemini-live-2.5-flash-preview)',
-          GEMINI_TEXT_MODEL: process.env.GEMINI_TEXT_MODEL || '(not set)',
+          GEMINI_API_KEYS_count: (process.env.GEMINI_API_KEYS || '').split(',').filter((k) => k.trim()).length,
+          GEMINI_LIVE_MODEL: process.env.GEMINI_LIVE_MODEL || '(default: gemini-2.0-flash-exp)',
+          GEMINI_TEXT_MODEL: process.env.GEMINI_TEXT_MODEL || '(default: gemini-2.5-flash)',
           DATABASE_URL_set: !!(process.env.DATABASE_URL || '').trim(),
           NODE_ENV: process.env.NODE_ENV,
         },
-        liveApiTest: null,
+        textApiTest: null,
+        liveWsTest: null,
       };
 
-      // Test Gemini Live API connection
-      try {
-        const orchestrator = getKeyOrchestrator();
-        const testKey = orchestrator.getKey();
-        const testClient = new GoogleGenAI({ apiKey: testKey });
-        const liveModel = (process.env.GEMINI_LIVE_MODEL || 'gemini-live-2.5-flash-preview').trim().replace(/^["']|["']$/g, '');
+      // 1. Test Text API (Standard generateContent to verify key validity)
+      if (testKey) {
+        try {
+          const ai = new GoogleGenAI({ apiKey: testKey });
+          const response = await ai.models.generateContent({
+            model: process.env.GEMINI_TEXT_MODEL || 'gemini-2.5-flash',
+            contents: 'Say "SpeakX is ready!" in 4 words.',
+          });
+          diagnostics.textApiTest = {
+            status: 'success',
+            response: response.text?.trim() || '(received response)',
+          };
+        } catch (err) {
+          diagnostics.textApiTest = {
+            status: 'error',
+            message: err.message || String(err),
+          };
+        }
 
-        diagnostics.liveApiTest = { status: 'connecting', model: liveModel, keyPrefix: testKey.slice(0, 8) + '...' };
+        // 2. Test Live WebSocket Handshake
+        try {
+          let rawModel = (process.env.GEMINI_LIVE_MODEL || 'gemini-2.0-flash-exp').trim().replace(/^["']|["']$/g, '');
+          if (!rawModel || rawModel.includes('2.5-flash-live-preview') || rawModel === 'gemini-live-2.5-flash-preview') {
+            rawModel = 'gemini-2.0-flash-exp';
+          }
+          const modelName = rawModel.startsWith('models/') ? rawModel : `models/${rawModel}`;
 
-        const session = await Promise.race([
-          testClient.live.connect({
-            model: liveModel,
-            config: {
-              responseModalities: [Modality.AUDIO],
-            },
-            callbacks: {
-              onopen: () => {},
-              onmessage: () => {},
-              onerror: (e) => {
-                console.error('[Debug] Live test onerror:', e?.message || e);
-              },
-              onclose: () => {},
-            },
-          }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timed out after 10s')), 10000)),
-        ]);
+          const host = 'generativelanguage.googleapis.com';
+          const uri = `wss://${host}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${testKey}`;
 
-        // If we got here, the connection succeeded
-        diagnostics.liveApiTest = {
-          status: 'success',
-          model: liveModel,
-          keyPrefix: testKey.slice(0, 8) + '...',
-          message: 'Live API connection succeeded!',
-        };
+          diagnostics.liveWsTest = await new Promise((resolve) => {
+            const timeout = setTimeout(() => {
+              try { testWs.close(); } catch {}
+              resolve({ status: 'timeout', message: `No setup response from Google after 8s for ${modelName}` });
+            }, 8000);
 
-        // Close the test session
-        try { session.close(); } catch {}
+            const testWs = new WebSocket(uri);
 
-      } catch (error) {
-        diagnostics.liveApiTest = {
-          status: 'error',
-          message: error.message || String(error),
-          stack: error.stack?.split('\n').slice(0, 5),
-        };
+            testWs.on('open', () => {
+              testWs.send(
+                JSON.stringify({
+                  setup: {
+                    model: modelName,
+                    generationConfig: { responseModalities: ['AUDIO'] },
+                  },
+                })
+              );
+            });
+
+            testWs.on('message', (raw) => {
+              try {
+                const msg = JSON.parse(raw.toString());
+                if (msg.setupComplete) {
+                  clearTimeout(timeout);
+                  try { testWs.close(); } catch {}
+                  resolve({ status: 'success', message: `Live WebSocket setupComplete received! Model: ${modelName}` });
+                }
+              } catch (e) {
+                clearTimeout(timeout);
+                try { testWs.close(); } catch {}
+                resolve({ status: 'error', message: 'Failed to parse setup message: ' + e.message });
+              }
+            });
+
+            testWs.on('error', (err) => {
+              clearTimeout(timeout);
+              resolve({ status: 'error', message: err.message || 'WebSocket error' });
+            });
+
+            testWs.on('close', (code, reason) => {
+              clearTimeout(timeout);
+              resolve({ status: 'closed', message: `Socket closed: code=${code}, reason=${reason?.toString() || 'none'}` });
+            });
+          });
+        } catch (err) {
+          diagnostics.liveWsTest = { status: 'error', message: err.message || String(err) };
+        }
       }
 
       res.statusCode = 200;
@@ -334,7 +428,6 @@ app.prepare().then(async () => {
 
     let liveSession = null;
     let transcript = [];
-    let sessionConfig = null;
 
     ws.on('message', async (data, isBinary) => {
       try {
@@ -352,7 +445,6 @@ app.prepare().then(async () => {
 
         switch (message.type) {
           case 'start': {
-            sessionConfig = message;
             const scenarioPrompt = message.systemPrompt || 'You are a helpful conversation partner for communication practice.';
             const memoryBrief = message.memoryBrief || '';
 
@@ -360,23 +452,33 @@ app.prepare().then(async () => {
               systemPrompt: scenarioPrompt,
               memoryBrief: memoryBrief,
               onAudio: (audioData) => {
-                ws.send(JSON.stringify({ type: 'audio', data: audioData }));
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'audio', data: audioData }));
+                }
               },
               onTranscript: (role, text) => {
                 transcript.push({ role, text, timestamp: Date.now() });
-                ws.send(JSON.stringify({ type: 'transcript', role, text }));
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'transcript', role, text }));
+                }
               },
               onError: (error) => {
                 console.error('[WS] Live session error:', error.message);
-                ws.send(JSON.stringify({ type: 'error', message: error.message }));
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'error', message: error.message }));
+                }
               },
               onClose: () => {
-                ws.send(JSON.stringify({ type: 'session-ended', transcript }));
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'session-ended', transcript }));
+                }
               },
             });
 
             await liveSession.connect();
-            ws.send(JSON.stringify({ type: 'connected' }));
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'connected' }));
+            }
             console.log('[WS] Live session started');
             break;
           }
@@ -394,7 +496,9 @@ app.prepare().then(async () => {
               liveSession.disconnect();
               liveSession = null;
             }
-            ws.send(JSON.stringify({ type: 'session-ended', transcript }));
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'session-ended', transcript }));
+            }
             console.log('[WS] Live session stopped');
             break;
           }
@@ -404,7 +508,9 @@ app.prepare().then(async () => {
         }
       } catch (error) {
         console.error('[WS] Error handling message:', error);
-        ws.send(JSON.stringify({ type: 'error', message: error.message || 'Unknown error' }));
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'error', message: error.message || 'Unknown error' }));
+        }
       }
     });
 
@@ -428,6 +534,7 @@ app.prepare().then(async () => {
   ║                                           ║
   ║  → App:       http://localhost:${port}        ║
   ║  → WebSocket: ws://localhost:${port}/api/ws/live ║
+  ║  → Debug:     http://localhost:${port}/api/debug   ║
   ║  → Mode:      ${dev ? 'Development' : 'Production'}              ║
   ╚═══════════════════════════════════════════╝
     `);
