@@ -14,6 +14,9 @@ const { GoogleGenAI } = require('@google/genai');
 const dev = process.env.NODE_ENV !== 'production';
 const port = parseInt(process.env.PORT || '3000', 10);
 
+// Global cache for the confirmed working live model
+let cachedWorkingLiveModel = null;
+
 // Key Orchestrator for API key rotation & quota handling
 class ServerKeyOrchestrator {
   constructor(config = {}) {
@@ -88,10 +91,7 @@ function getKeyOrchestrator() {
 }
 
 /**
- * Direct Gemini Live WebSocket Session Manager
- *
- * Uses native ws.WebSocket to connect directly to the Gemini Multimodal Live API.
- * This avoids SDK abstractions and ensures reliable handshake & event delivery.
+ * Direct Gemini Live WebSocket Session Manager with automatic Model Fallback
  */
 class ServerGeminiLiveSession {
   constructor(config) {
@@ -99,18 +99,53 @@ class ServerGeminiLiveSession {
     this.ws = null;
     this.currentKey = '';
     this.isActive = false;
+    this.activeModel = '';
   }
 
   async connect() {
     const orchestrator = getKeyOrchestrator();
     this.currentKey = orchestrator.getKey();
 
-    let rawModel = (process.env.GEMINI_LIVE_MODEL || 'gemini-2.0-flash-exp').trim().replace(/^["']|["']$/g, '');
-    if (!rawModel || rawModel.includes('2.5-flash-live-preview') || rawModel === 'gemini-live-2.5-flash-preview') {
-      rawModel = 'gemini-2.0-flash-exp';
-    }
-    const modelName = rawModel.startsWith('models/') ? rawModel : `models/${rawModel}`;
+    // Build ordered list of candidate models to try
+    const configuredModel = (process.env.GEMINI_LIVE_MODEL || '').trim().replace(/^["']|["']$/g, '');
+    const candidateList = [
+      cachedWorkingLiveModel,
+      configuredModel,
+      'gemini-2.0-flash-realtime-exp',
+      'gemini-2.0-flash',
+      'gemini-2.5-flash',
+      'gemini-2.0-flash-exp',
+    ].filter(Boolean);
 
+    // Deduplicate
+    const candidates = Array.from(new Set(candidateList));
+
+    let lastError = null;
+
+    for (const rawCandidate of candidates) {
+      // Clean model name
+      let clean = rawCandidate.replace(/^models\//, '');
+      if (clean.includes('live-preview') || clean.includes('2.5-flash-live-preview')) {
+        continue;
+      }
+      const modelName = `models/${clean}`;
+
+      try {
+        await this._attemptConnectWithModel(modelName, orchestrator);
+        console.log(`[GeminiLive] Successfully connected with model: ${modelName}`);
+        cachedWorkingLiveModel = clean;
+        this.activeModel = modelName;
+        return this;
+      } catch (err) {
+        console.warn(`[GeminiLive] Candidate model ${modelName} failed: ${err.message}. Trying next candidate...`);
+        lastError = err;
+      }
+    }
+
+    throw lastError || new Error('All Gemini Live candidate models failed to connect');
+  }
+
+  _attemptConnectWithModel(modelName, orchestrator) {
     const host = 'generativelanguage.googleapis.com';
     const uri = `wss://${host}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${this.currentKey}`;
 
@@ -119,24 +154,21 @@ class ServerGeminiLiveSession {
       this.config.memoryBrief ? `\n\n--- Student Background ---\n${this.config.memoryBrief}` : '',
     ].join('');
 
-    console.log(`[GeminiLive] Connecting to ${modelName}... (key: ${this.currentKey.slice(0, 8)}...)`);
-
     return new Promise((resolve, reject) => {
       let isResolved = false;
       const timeoutTimer = setTimeout(() => {
         if (!isResolved) {
           isResolved = true;
           this.close();
-          reject(new Error(`Gemini Live connection timed out after 12s (model: ${modelName})`));
+          reject(new Error(`Connection timed out for ${modelName}`));
         }
-      }, 12000);
+      }, 7000);
 
       try {
         const ws = new WebSocket(uri);
         this.ws = ws;
 
         ws.on('open', () => {
-          console.log('[GeminiLive] WebSocket connected. Sending setup message...');
           const setupMsg = {
             setup: {
               model: modelName,
@@ -145,7 +177,7 @@ class ServerGeminiLiveSession {
                 speechConfig: {
                   voiceConfig: {
                     prebuiltVoiceConfig: {
-                      voiceName: 'Aoede', // Friendly, clear voice
+                      voiceName: 'Aoede',
                     },
                   },
                 },
@@ -164,20 +196,19 @@ class ServerGeminiLiveSession {
 
             // Handshake complete
             if (data.setupComplete) {
-              console.log('[GeminiLive] Setup completed successfully!');
               this.isActive = true;
               orchestrator.reportSuccess(this.currentKey);
               if (!isResolved) {
                 isResolved = true;
                 clearTimeout(timeoutTimer);
-                resolve(this);
+                resolve();
               }
               return;
             }
 
             // Server Content (Audio / Transcript)
             if (data.serverContent) {
-              const { modelTurn, interrupted, turnComplete } = data.serverContent;
+              const { modelTurn, interrupted } = data.serverContent;
 
               if (modelTurn?.parts) {
                 for (const part of modelTurn.parts) {
@@ -200,28 +231,29 @@ class ServerGeminiLiveSession {
         });
 
         ws.on('error', (err) => {
-          console.error('[GeminiLive] Socket error:', err.message || err);
           const msg = err.message || 'Gemini Live WebSocket error';
           if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED')) {
             orchestrator.reportExhausted(this.currentKey, msg);
           }
-          this.config.onError(new Error(msg));
           if (!isResolved) {
             isResolved = true;
             clearTimeout(timeoutTimer);
             reject(err);
+          } else {
+            this.config.onError(new Error(msg));
           }
         });
 
         ws.on('close', (code, reason) => {
-          console.log(`[GeminiLive] Socket closed: code=${code}, reason=${reason?.toString() || 'none'}`);
+          const reasonStr = reason?.toString() || '';
           this.isActive = false;
           if (!isResolved) {
             isResolved = true;
             clearTimeout(timeoutTimer);
-            reject(new Error(`Gemini Live closed connection during setup (code ${code}: ${reason?.toString() || 'no reason'})`));
+            reject(new Error(`Socket closed (${code}: ${reasonStr})`));
+          } else {
+            this.config.onClose();
           }
-          this.config.onClose();
         });
       } catch (err) {
         if (!isResolved) {
@@ -312,17 +344,19 @@ app.prepare().then(async () => {
         env: {
           GEMINI_API_KEYS_set: !!(process.env.GEMINI_API_KEYS || '').trim(),
           GEMINI_API_KEYS_count: (process.env.GEMINI_API_KEYS || '').split(',').filter((k) => k.trim()).length,
-          GEMINI_LIVE_MODEL: process.env.GEMINI_LIVE_MODEL || '(default: gemini-2.0-flash-exp)',
+          GEMINI_LIVE_MODEL: process.env.GEMINI_LIVE_MODEL || '(default: auto-detect)',
           GEMINI_TEXT_MODEL: process.env.GEMINI_TEXT_MODEL || '(default: gemini-2.5-flash)',
+          cachedWorkingLiveModel: cachedWorkingLiveModel || '(none yet)',
           DATABASE_URL_set: !!(process.env.DATABASE_URL || '').trim(),
           NODE_ENV: process.env.NODE_ENV,
         },
         textApiTest: null,
-        liveWsTest: null,
+        availableModels: [],
+        liveCandidateTests: {},
       };
 
-      // 1. Test Text API (Standard generateContent to verify key validity)
       if (testKey) {
+        // 1. Test Text API
         try {
           const ai = new GoogleGenAI({ apiKey: testKey });
           const response = await ai.models.generateContent({
@@ -333,6 +367,20 @@ app.prepare().then(async () => {
             status: 'success',
             response: response.text?.trim() || '(received response)',
           };
+
+          // Query models list
+          try {
+            const list = await ai.models.list();
+            for await (const m of list) {
+              diagnostics.availableModels.push({
+                name: m.name,
+                displayName: m.displayName,
+                supportedActions: m.supportedActions,
+              });
+            }
+          } catch (e) {
+            diagnostics.availableModels = ['Error listing models: ' + e.message];
+          }
         } catch (err) {
           diagnostics.textApiTest = {
             status: 'error',
@@ -340,22 +388,23 @@ app.prepare().then(async () => {
           };
         }
 
-        // 2. Test Live WebSocket Handshake
-        try {
-          let rawModel = (process.env.GEMINI_LIVE_MODEL || 'gemini-2.0-flash-exp').trim().replace(/^["']|["']$/g, '');
-          if (!rawModel || rawModel.includes('2.5-flash-live-preview') || rawModel === 'gemini-live-2.5-flash-preview') {
-            rawModel = 'gemini-2.0-flash-exp';
-          }
-          const modelName = rawModel.startsWith('models/') ? rawModel : `models/${rawModel}`;
+        // 2. Test Live Candidates in parallel
+        const testCandidates = [
+          'models/gemini-2.0-flash-realtime-exp',
+          'models/gemini-2.0-flash',
+          'models/gemini-2.5-flash',
+          'models/gemini-2.0-flash-exp',
+        ];
 
-          const host = 'generativelanguage.googleapis.com';
-          const uri = `wss://${host}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${testKey}`;
+        const testModelWs = (modelName) =>
+          new Promise((resolve) => {
+            const host = 'generativelanguage.googleapis.com';
+            const uri = `wss://${host}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${testKey}`;
 
-          diagnostics.liveWsTest = await new Promise((resolve) => {
             const timeout = setTimeout(() => {
               try { testWs.close(); } catch {}
-              resolve({ status: 'timeout', message: `No setup response from Google after 8s for ${modelName}` });
-            }, 8000);
+              resolve({ status: 'timeout', message: 'No setup response after 5s' });
+            }, 5000);
 
             const testWs = new WebSocket(uri);
 
@@ -376,27 +425,31 @@ app.prepare().then(async () => {
                 if (msg.setupComplete) {
                   clearTimeout(timeout);
                   try { testWs.close(); } catch {}
-                  resolve({ status: 'success', message: `Live WebSocket setupComplete received! Model: ${modelName}` });
+                  resolve({ status: 'success', message: 'Setup Complete!' });
                 }
               } catch (e) {
                 clearTimeout(timeout);
                 try { testWs.close(); } catch {}
-                resolve({ status: 'error', message: 'Failed to parse setup message: ' + e.message });
+                resolve({ status: 'error', message: e.message });
               }
             });
 
             testWs.on('error', (err) => {
               clearTimeout(timeout);
-              resolve({ status: 'error', message: err.message || 'WebSocket error' });
+              resolve({ status: 'error', message: err.message });
             });
 
             testWs.on('close', (code, reason) => {
               clearTimeout(timeout);
-              resolve({ status: 'closed', message: `Socket closed: code=${code}, reason=${reason?.toString() || 'none'}` });
+              resolve({ status: 'closed', message: `code=${code}, reason=${reason?.toString() || 'none'}` });
             });
           });
-        } catch (err) {
-          diagnostics.liveWsTest = { status: 'error', message: err.message || String(err) };
+
+        for (const candidate of testCandidates) {
+          diagnostics.liveCandidateTests[candidate] = await testModelWs(candidate);
+          if (diagnostics.liveCandidateTests[candidate].status === 'success') {
+            cachedWorkingLiveModel = candidate.replace(/^models\//, '');
+          }
         }
       }
 
@@ -477,9 +530,9 @@ app.prepare().then(async () => {
 
             await liveSession.connect();
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'connected' }));
+              ws.send(JSON.stringify({ type: 'connected', model: liveSession.activeModel }));
             }
-            console.log('[WS] Live session started');
+            console.log(`[WS] Live session started with ${liveSession.activeModel}`);
             break;
           }
 
